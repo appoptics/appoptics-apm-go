@@ -227,7 +227,7 @@ func TestWithTransactionFiltering(t *testing.T) {
 
 	// 4.incoming sampling xtrace + “disabled” transaction settings not matched
 	r = reporter.SetTestReporter()
-	tr = NewTraceFromIDForURL(layerName, samplingID, "/eric", nil)
+	tr = NewTraceFromIDForURL(layerName, samplingID, "/eric", Overrides{}, nil)
 	tr.End()
 	r.Close(2)
 	assert.Equal(t, 2, len(r.EventBufs))
@@ -235,7 +235,7 @@ func TestWithTransactionFiltering(t *testing.T) {
 
 	// 5.incoming sampling xtrace + “disabled” transaction settings matched
 	r = reporter.SetTestReporter()
-	tr = NewTraceFromIDForURL(layerName, samplingID, "/test2", nil)
+	tr = NewTraceFromIDForURL(layerName, samplingID, "/test2", Overrides{}, nil)
 	tr.End()
 	r.Close(0)
 	assert.Equal(t, 0, len(r.EventBufs))
@@ -243,7 +243,7 @@ func TestWithTransactionFiltering(t *testing.T) {
 
 	// 6.incoming non-sampling xtrace + “disabled” transaction settings not matched
 	r = reporter.SetTestReporter()
-	tr = NewTraceFromIDForURL(layerName, nonSamplingID, "/eric", nil)
+	tr = NewTraceFromIDForURL(layerName, nonSamplingID, "/eric", Overrides{}, nil)
 	tr.End()
 	r.Close(0)
 	assert.Equal(t, 0, len(r.EventBufs))
@@ -251,7 +251,7 @@ func TestWithTransactionFiltering(t *testing.T) {
 
 	// 7. incoming non-sampling xtrace + “disabled” transaction settings matched
 	r = reporter.SetTestReporter()
-	tr = NewTraceFromIDForURL(layerName, nonSamplingID, "/test3", nil)
+	tr = NewTraceFromIDForURL(layerName, nonSamplingID, "/test3", Overrides{}, nil)
 	tr.End()
 	r.Close(0)
 	assert.Equal(t, 0, len(r.EventBufs))
@@ -294,7 +294,7 @@ func TestWithTransactionFiltering(t *testing.T) {
 
 	// 11.incoming sampling xtrace + “enabled” transaction settings not matched
 	r = reporter.SetTestReporter()
-	tr = NewTraceFromIDForURL(layerName, samplingID, "/eric", nil)
+	tr = NewTraceFromIDForURL(layerName, samplingID, "/eric", Overrides{}, nil)
 	tr.End()
 	r.Close(0)
 	assert.Equal(t, 0, len(r.EventBufs))
@@ -302,7 +302,7 @@ func TestWithTransactionFiltering(t *testing.T) {
 
 	// 12.incoming sampling xtrace + “enabled” transaction settings matched
 	r = reporter.SetTestReporter()
-	tr = NewTraceFromIDForURL(layerName, samplingID, "/test2", nil)
+	tr = NewTraceFromIDForURL(layerName, samplingID, "/test2", Overrides{}, nil)
 	tr.End()
 	r.Close(2)
 	assert.Equal(t, 2, len(r.EventBufs))
@@ -310,7 +310,7 @@ func TestWithTransactionFiltering(t *testing.T) {
 
 	// 13.incoming non-sampling xtrace + “enabled” transaction settings not matched
 	r = reporter.SetTestReporter()
-	tr = NewTraceFromIDForURL(layerName, nonSamplingID, "/eric", nil)
+	tr = NewTraceFromIDForURL(layerName, nonSamplingID, "/eric", Overrides{}, nil)
 	tr.End()
 	r.Close(0)
 	assert.Equal(t, 0, len(r.EventBufs))
@@ -318,7 +318,7 @@ func TestWithTransactionFiltering(t *testing.T) {
 
 	// 14.incoming non-sampling xtrace + “enabled” transaction settings matched
 	r = reporter.SetTestReporter()
-	tr = NewTraceFromIDForURL(layerName, nonSamplingID, "/test3", nil)
+	tr = NewTraceFromIDForURL(layerName, nonSamplingID, "/test3", Overrides{}, nil)
 	tr.End()
 	r.Close(0)
 	assert.Equal(t, 0, len(r.EventBufs))

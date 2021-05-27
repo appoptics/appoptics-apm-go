@@ -8,16 +8,16 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"math"
-
 	"github.com/appoptics/appoptics-apm-go/v1/ao/internal/bson"
 	"github.com/appoptics/appoptics-apm-go/v1/ao/internal/config"
 	"github.com/appoptics/appoptics-apm-go/v1/ao/internal/log"
+	"math"
 )
 
 type event struct {
-	metadata oboeMetadata
-	bbuf     *bson.Buffer
+	metadata  oboeMetadata
+	overrides Overrides
+	bbuf      *bson.Buffer
 }
 
 // Label is a required event attribute.
@@ -149,7 +149,7 @@ func (tm tracingMode) ToString() string {
 	}
 }
 
-func oboeEventInit(evt *event, md *oboeMetadata) error {
+func oboeEventInit(evt *event, md *oboeMetadata, explicitXTraceId string) error {
 	if evt == nil || md == nil {
 		return errors.New("oboeEventInit got nil args")
 	}
@@ -157,14 +157,17 @@ func oboeEventInit(evt *event, md *oboeMetadata) error {
 	// Metadata initialization
 	evt.metadata.Init()
 
-	evt.metadata.taskLen = md.taskLen
-	evt.metadata.opLen = md.opLen
-
-	copy(evt.metadata.ids.taskID, md.ids.taskID)
-	if err := evt.metadata.SetRandomOpID(); err != nil {
-		return err
+	if explicitXTraceId == "" {
+		evt.metadata.taskLen = md.taskLen
+		evt.metadata.opLen = md.opLen
+		if err := evt.metadata.SetRandomOpID(); err != nil {
+			return err
+		}
+		copy(evt.metadata.ids.taskID, md.ids.taskID)
+		evt.metadata.flags = md.flags
+	} else {
+		evt.metadata.FromString(explicitXTraceId)
 	}
-	evt.metadata.flags = md.flags
 
 	// Buffer initialization
 	evt.bbuf = bson.NewBuffer()
@@ -181,9 +184,9 @@ func oboeEventInit(evt *event, md *oboeMetadata) error {
 	return nil
 }
 
-func newEvent(md *oboeMetadata, label Label, layer string) (*event, error) {
+func newEvent(md *oboeMetadata, label Label, layer string, explicitXTraceID string) (*event, error) {
 	e := &event{}
-	if err := oboeEventInit(e, md); err != nil {
+	if err := oboeEventInit(e, md, explicitXTraceID); err != nil {
 		return nil, err
 	}
 	e.addLabelLayer(label, layer)
@@ -363,7 +366,7 @@ func (e *event) ReportStatus(c *oboeContext) error { return e.ReportUsing(c, glo
 // Report event using Context interface
 func (e *event) ReportContext(c Context, addCtxEdge bool, args ...interface{}) error {
 	if ctx, ok := c.(*oboeContext); ok {
-		return ctx.report(e, addCtxEdge, args...)
+		return ctx.report(e, addCtxEdge, Overrides{}, args...)
 	}
 	return nil
 }

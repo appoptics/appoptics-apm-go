@@ -2,7 +2,11 @@
 
 package ao
 
-import "context"
+import (
+	"context"
+	"github.com/appoptics/appoptics-apm-go/v1/ao/internal/log"
+	"github.com/appoptics/appoptics-apm-go/v1/ao/internal/reporter"
+)
 
 type contextKeyT interface{}
 
@@ -17,6 +21,14 @@ func NewContext(ctx context.Context, t Trace) context.Context {
 // newSpanContext returns a copy of the parent context and associates it with a Span.
 func newSpanContext(ctx context.Context, l Span) context.Context {
 	return context.WithValue(ctx, contextSpanKey, l)
+}
+
+func FromXTraceIDContext(ctx context.Context, xTraceID string) context.Context {
+	aoCtx, err := reporter.NewContextFromMetadataString(xTraceID)
+	if err != nil {
+		log.Warningf("xTrace ID %v is invalid \n", xTraceID)
+	}
+	return context.WithValue(ctx, contextSpanKey, contextSpan{aoCtx: aoCtx})
 }
 
 // FromContext returns the Span bound to the context, if any.

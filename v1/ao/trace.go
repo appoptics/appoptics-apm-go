@@ -74,6 +74,11 @@ type Trace interface {
 	SetHTTPRspHeaders(map[string]string)
 }
 
+type Overrides struct {
+	ExplicitTS    time.Time
+	ExplicitMdStr string
+}
+
 // KVMap is a map of additional key-value pairs to report along with the event data provided
 // to AppOptics. Certain key names (such as "Query" or "RemoteHost") are used by AppOptics to
 // provide details about program activity and distinguish between different types of spans.
@@ -87,6 +92,7 @@ type ContextOptions = reporter.ContextOptions
 type traceHTTPSpan struct {
 	span       metrics.HTTPSpanMessage
 	start      time.Time
+	end        time.Time
 	controller string
 	action     string
 }
@@ -96,6 +102,7 @@ type aoTrace struct {
 	exitEvent      reporter.Event
 	httpSpan       traceHTTPSpan
 	httpRspHeaders map[string]string
+	overrides      Overrides
 }
 
 func (t *aoTrace) aoContext() reporter.Context { return t.aoCtx }
@@ -147,19 +154,27 @@ func NewTraceWithOptions(spanName string, opts SpanOptions) Trace {
 // incoming trace ID (e.g. from a incoming RPC or service call's "X-Trace" header).
 // If callback is provided & trace is sampled, cb will be called for entry event KVs
 func NewTraceFromID(spanName, mdStr string, cb func() KVMap) Trace {
-	return NewTraceFromIDForURL(spanName, mdStr, "", cb)
+	return NewTraceFromIDForURL(spanName, mdStr, "", Overrides{}, cb)
+}
+
+func NewTraceWithOverrides(spanName string, overrides Overrides, cb func() KVMap) Trace {
+	return NewTraceFromIDForURL(spanName, "", "", overrides, cb)
 }
 
 // NewTraceFromIDForURL creates a new Trace for the provided URL to report to AppOptics,
 // provided an incoming trace ID (e.g. from a incoming RPC or service call's "X-Trace" header).
 // If callback is provided & trace is sampled, cb will be called for entry event KVs
-func NewTraceFromIDForURL(spanName, mdStr string, url string, cb func() KVMap) Trace {
+func NewTraceFromIDForURL(spanName, mdStr string, url string, overrides Overrides, cb func() KVMap) Trace {
 	return NewTraceWithOptions(spanName, SpanOptions{
 		WithBackTrace: false,
 		ContextOptions: ContextOptions{
 			MdStr: mdStr,
 			URL:   url,
-			CB:    cb,
+			Overrides: reporter.Overrides{
+				ExplicitTS:    overrides.ExplicitTS,
+				ExplicitMdStr: overrides.ExplicitMdStr,
+			},
+			CB: cb,
 		},
 	})
 }
@@ -184,6 +199,15 @@ func (t *aoTrace) End(args ...interface{}) {
 	}
 }
 
+func (t *aoTrace) EndWithOverrides(overrides Overrides, args ...interface{}) {
+	if t.ok() {
+		t.overrides = overrides
+		t.AddEndArgs(args...)
+		t.reportExit()
+		flushAgent()
+	}
+}
+
 // EndCallback ends a Trace, reporting additional KV pairs returned by calling cb
 func (t *aoTrace) EndCallback(cb func() KVMap) {
 	if t.ok() {
@@ -202,6 +226,10 @@ func (t *aoTrace) EndCallback(cb func() KVMap) {
 // SetStartTime sets the start time of a trace
 func (t *aoTrace) SetStartTime(start time.Time) {
 	t.httpSpan.start = start
+}
+
+func (t *aoTrace) SetEndTime(end time.Time) {
+	t.httpSpan.end = end
 }
 
 // SetMethod sets the request's HTTP method, if any
@@ -239,7 +267,13 @@ func (t *aoTrace) reportExit() {
 
 		// record a new span
 		if !t.httpSpan.start.IsZero() && t.aoCtx.GetEnabled() {
-			t.httpSpan.span.Duration = time.Now().Sub(t.httpSpan.start)
+			var end time.Time
+			if t.httpSpan.end.IsZero() {
+				end = time.Now()
+			} else {
+				end = t.httpSpan.end
+			}
+			t.httpSpan.span.Duration = end.Sub(t.httpSpan.start)
 			t.recordHTTPSpan()
 		}
 
@@ -249,7 +283,10 @@ func (t *aoTrace) reportExit() {
 		if t.exitEvent != nil { // use exit event, if one was provided
 			t.exitEvent.ReportContext(t.aoCtx, true, t.endArgs...)
 		} else {
-			t.aoCtx.ReportEvent(reporter.LabelExit, t.layerName(), t.endArgs...)
+			t.aoCtx.ReportEventWithOverrides(reporter.LabelExit, t.layerName(), reporter.Overrides{
+				ExplicitTS:    t.overrides.ExplicitTS,
+				ExplicitMdStr: t.overrides.ExplicitMdStr,
+			}, t.endArgs...)
 		}
 
 		t.childEdges = nil // clear child edge list

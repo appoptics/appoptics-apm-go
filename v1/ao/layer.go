@@ -6,10 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/appoptics/appoptics-apm-go/v1/ao/internal/reporter"
 	"runtime/debug"
 	"sync"
-
-	"github.com/appoptics/appoptics-apm-go/v1/ao/internal/reporter"
 )
 
 const (
@@ -66,6 +65,8 @@ type Span interface {
 	// BeginSpanWithOptions starts a new child span with provided options
 	BeginSpanWithOptions(spanName string, opts SpanOptions, args ...interface{}) Span
 
+	BeginSpanWithOverrides(spanName string, opts SpanOptions, overrides Overrides, args ...interface{}) Span
+
 	// BeginProfile starts a new Profile, used to measure a named span
 	// of time spent in this Span.
 	//
@@ -74,6 +75,9 @@ type Span interface {
 	BeginProfile(profileName string, args ...interface{}) Profile
 	// End ends a Span, optionally reporting KV pairs provided by args.
 	End(args ...interface{})
+
+	EndWithOverrides(overrides Overrides, args ...interface{})
+
 	// AddEndArgs adds additional KV pairs that will be serialized (and
 	// dereferenced, for pointer values) at the end of this trace's span.
 	AddEndArgs(args ...interface{})
@@ -84,8 +88,6 @@ type Span interface {
 	// InfoWithOptions reports a new info event with the KVs and options provided
 	InfoWithOptions(opts SpanOptions, args ...interface{})
 
-	// ErrorWithOpts reports an error with customized options
-	ErrorWithOpts(opts... ErrOpt)
 	// Error reports details about an error (along with a stack trace) for this Span.
 	Error(class, msg string)
 	// Err reports details about error err (along with a stack trace) for this Span.
@@ -197,9 +199,13 @@ func fromKVs(kvs ...interface{}) KVMap {
 
 // BeginSpanWithOptions starts a span with provided options
 func BeginSpanWithOptions(ctx context.Context, spanName string, opts SpanOptions, args ...interface{}) (Span, context.Context) {
+	return BeginSpanWithOverrides(ctx, spanName, opts, Overrides{}, args)
+}
+
+func BeginSpanWithOverrides(ctx context.Context, spanName string, opts SpanOptions, overrides Overrides, args ...interface{}) (Span, context.Context) {
 	kvs := addKVsFromOpts(opts, args...)
 	if parent, ok := fromContext(ctx); ok && parent.ok() { // report span entry from parent context
-		l := newSpan(parent.aoContext().Copy(), spanName, parent, kvs...)
+		l := newSpan(parent.aoContext().Copy(), spanName, parent, overrides, kvs...)
 		return l, newSpanContext(ctx, l)
 	}
 	return nullSpan{}, ctx
@@ -212,9 +218,14 @@ func (s *layerSpan) BeginSpan(spanName string, args ...interface{}) Span {
 
 // BeginSpanWithOptions starts a new child span with provided options
 func (s *layerSpan) BeginSpanWithOptions(spanName string, opts SpanOptions, args ...interface{}) Span {
+	return s.BeginSpanWithOverrides(spanName, opts, Overrides{}, args...)
+}
+
+// BeginSpanWithOptions starts a new child span with provided options
+func (s *layerSpan) BeginSpanWithOverrides(spanName string, opts SpanOptions, overrides Overrides, args ...interface{}) Span {
 	if s.ok() { // copy parent context and report entry from child
 		kvs := addKVsFromOpts(opts, args...)
-		return newSpan(s.aoCtx.Copy(), spanName, s, kvs...)
+		return newSpan(s.aoCtx.Copy(), spanName, s, overrides, kvs...)
 	}
 	return nullSpan{}
 }
@@ -242,8 +253,12 @@ func (s *layerSpan) BeginProfile(profileName string, args ...interface{}) Profil
 	return s.BeginSpan(profileName, args)
 }
 
-// End a profiled block or method.
 func (s *span) End(args ...interface{}) {
+	s.End(nil, args)
+}
+
+// End a profiled block or method.
+func (s *span) EndWithOverrides(overrides Overrides, args ...interface{}) {
 	if s.ok() {
 		s.lock.Lock()
 		defer s.lock.Unlock()
@@ -254,7 +269,10 @@ func (s *span) End(args ...interface{}) {
 		for _, edge := range s.childEdges { // add Edge KV for each joined child
 			args = append(args, keyEdge, edge)
 		}
-		_ = s.aoCtx.ReportEvent(s.exitLabel(), s.layerName(), args...)
+		_ = s.aoCtx.ReportEventWithOverrides(s.exitLabel(), s.layerName(), reporter.Overrides{
+			ExplicitTS:    overrides.ExplicitTS,
+			ExplicitMdStr: overrides.ExplicitMdStr,
+		}, args...)
 		s.childEdges = nil // clear child edge list
 		s.endArgs = nil
 		s.ended = true
@@ -343,84 +361,16 @@ func (s *span) GetTransactionName() string {
 	return s.aoCtx.GetTransactionName()
 }
 
-type ErrType string
-
-const (
-	ErrTypeException = "exception"
-	ErrTypeStatus = "status"
-)
-
-// error classes
-const (
-	ErrClassHTTPError = "http error"
-	ErrClassError = "error"
-)
-
-type ErrOpts struct {
-	Type ErrType
-	Class string
-	Msg string
-	WithBackTrace bool
-}
-
-type ErrOpt func(*ErrOpts)
-
-func WithErrType(tp ErrType) ErrOpt {
-	return func(opts *ErrOpts) {
-		opts.Type = tp
-	}
-}
-
-func WithErrClass(c string) ErrOpt {
-	return func(opts *ErrOpts) {
-		opts.Class = c
-	}
-}
-
-func WithErrMsg(msg string) ErrOpt {
-	return func (opts *ErrOpts) {
-		opts.Msg = msg
-	}
-}
-
-func WithErrBackTrace(withBackTrace bool) ErrOpt {
-	return func(opts *ErrOpts) {
-		opts.WithBackTrace = withBackTrace
-	}
-}
-
-func (s *span) ErrorWithOpts(opts... ErrOpt) {
-	errOpts := &ErrOpts{
-		Type: "exception",
-		Class: "error",
-	}
-
-	for _, opt := range opts {
-		opt(errOpts)
-	}
-
-	var backTrace string
-	if errOpts.WithBackTrace {
-		backTrace = string(debug.Stack())
-	}
-
-	if errOpts.Type == ErrTypeStatus {
-		errOpts.Class = ErrClassHTTPError
-	}
-	
+// Error reports an error, distinguished by its class and message
+func (s *span) Error(class, msg string) {
 	if s.ok() {
 		s.aoCtx.ReportEvent(reporter.LabelError, s.layerName(),
 			keySpec, "error",
-			keyErrorType, errOpts.Type,
-			keyErrorClass, errOpts.Class,
-			keyErrorMsg, errOpts.Msg,
-			KeyBackTrace, backTrace)
+			keyErrorType, "exception",
+			keyErrorClass, class,
+			keyErrorMsg, msg,
+			KeyBackTrace, string(debug.Stack()))
 	}
-}
-
-// Error reports an error, distinguished by its class and message
-func (s *span) Error(class, msg string) {
-	s.ErrorWithOpts(WithErrType(ErrTypeException), WithErrClass(class), WithErrMsg(msg), WithErrBackTrace(true))
 }
 
 // Err reports the provided error type
@@ -446,30 +396,41 @@ type span struct {
 type layerSpan struct{ span }   // satisfies Span
 type profileSpan struct{ span } // satisfies Profile
 type nullSpan struct{}          // a span that is not tracing; satisfies Span & Profile
+type contextSpan struct {
+	nullSpan
+	aoCtx reporter.Context
+}
 
 func (s nullSpan) BeginSpan(spanName string, args ...interface{}) Span { return nullSpan{} }
 func (s nullSpan) BeginSpanWithOptions(spanName string, opts SpanOptions, args ...interface{}) Span {
 	return nullSpan{}
 }
-func (s nullSpan) BeginProfile(name string, args ...interface{}) Profile { return nullSpan{} }
-func (s nullSpan) End(args ...interface{})                               {}
-func (s nullSpan) AddEndArgs(args ...interface{})                        {}
-func (s nullSpan) Error(class, msg string)                               {}
-func (s nullSpan) ErrorWithOpts(opts... ErrOpt) {}
-func (s nullSpan) Err(err error)                                         {}
-func (s nullSpan) Info(args ...interface{})                              {}
-func (s nullSpan) InfoWithOptions(opts SpanOptions, args ...interface{}) {}
-func (s nullSpan) IsReporting() bool                                     { return false }
-func (s nullSpan) addChildEdge(reporter.Context)                         {}
-func (s nullSpan) addProfile(Profile)                                    {}
-func (s nullSpan) ok() bool                                              { return false }
-func (s nullSpan) aoContext() reporter.Context                           { return reporter.NewNullContext() }
-func (s nullSpan) MetadataString() string                                { return "" }
-func (s nullSpan) IsSampled() bool                                       { return false }
-func (s nullSpan) SetAsync(bool)                                         {}
-func (s nullSpan) SetOperationName(string)                               {}
-func (s nullSpan) SetTransactionName(string) error                       { return nil }
-func (s nullSpan) GetTransactionName() string                            { return "" }
+func (s nullSpan) BeginSpanWithOverrides(spanName string, opts SpanOptions, overrides Overrides, args ...interface{}) Span {
+	return nullSpan{}
+}
+
+func (s nullSpan) BeginProfile(name string, args ...interface{}) Profile     { return nullSpan{} }
+func (s nullSpan) End(args ...interface{})                                   {}
+func (s nullSpan) EndWithOverrides(overrides Overrides, args ...interface{}) {}
+func (s nullSpan) AddEndArgs(args ...interface{})                            {}
+func (s nullSpan) Error(class, msg string)                                   {}
+func (s nullSpan) Err(err error)                                             {}
+func (s nullSpan) Info(args ...interface{})                                  {}
+func (s nullSpan) InfoWithOptions(opts SpanOptions, args ...interface{})     {}
+func (s nullSpan) IsReporting() bool                                         { return false }
+func (s nullSpan) addChildEdge(reporter.Context)                             {}
+func (s nullSpan) addProfile(Profile)                                        {}
+func (s nullSpan) ok() bool                                                  { return false }
+func (s nullSpan) aoContext() reporter.Context                               { return reporter.NewNullContext() }
+func (s nullSpan) MetadataString() string                                    { return "" }
+func (s nullSpan) IsSampled() bool                                           { return false }
+func (s nullSpan) SetAsync(bool)                                             {}
+func (s nullSpan) SetOperationName(string)                                   {}
+func (s nullSpan) SetTransactionName(string) error                           { return nil }
+func (s nullSpan) GetTransactionName() string                                { return "" }
+
+func (s contextSpan) aoContext() reporter.Context { return s.aoCtx }
+func (s contextSpan) ok() bool                    { return true }
 
 // is this span still valid (has it timed out, expired, not sampled)
 func (s *span) ok() bool {
@@ -513,13 +474,18 @@ func (l spanLabeler) exitLabel() reporter.Label  { return reporter.LabelExit }
 func (l spanLabeler) layerName() string          { return l.name }
 func (l spanLabeler) setName(name string)        { l.name = name }
 
-func newSpan(aoCtx reporter.Context, spanName string, parent Span, args ...interface{}) Span {
+func newSpan(aoCtx reporter.Context, spanName string, parent Span, overrides Overrides, args ...interface{}) Span {
 	if spanName == "" {
 		return nullSpan{}
 	}
 
 	ll := spanLabeler{spanName}
-	if err := aoCtx.ReportEvent(ll.entryLabel(), ll.layerName(), args...); err != nil {
+
+	//fmt.Printf("Starting new span with context %+v\n", aoCtx)
+	if err := aoCtx.ReportEventWithOverrides(ll.entryLabel(), ll.layerName(), reporter.Overrides{
+		ExplicitTS:    overrides.ExplicitTS,
+		ExplicitMdStr: overrides.ExplicitMdStr,
+	}, args...); err != nil {
 		return nullSpan{}
 	}
 	return &layerSpan{span: span{aoCtx: aoCtx.Copy(), labeler: ll, parent: parent}}

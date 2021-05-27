@@ -169,17 +169,28 @@ func prepareEvent(ctx *oboeContext, e *event) error {
 		return errors.New("invalid context, event")
 	}
 
-	// The context metadata must have the same task_id as the event.
-	if !bytes.Equal(ctx.metadata.ids.taskID, e.metadata.ids.taskID) {
-		return errors.New("invalid event, different task_id from context")
+	// For now, disable the check if the entry event is using an explicit x-trace ID
+	// as the current logic in context.NewContext would use the same x-trace ID for
+	// context as the entry event. Therefore the opID is the same.
+	if e.overrides.ExplicitMdStr == "" {
+		// The context metadata must have the same task_id as the event.
+		if !bytes.Equal(ctx.metadata.ids.taskID, e.metadata.ids.taskID) {
+			return errors.New("invalid event, different task_id from context")
+		}
+
+		// The context metadata must have a different op_id than the event.
+		if bytes.Equal(ctx.metadata.ids.opID, e.metadata.ids.opID) {
+			return errors.New("invalid event, same as context")
+		}
 	}
 
-	// The context metadata must have a different op_id than the event.
-	if bytes.Equal(ctx.metadata.ids.opID, e.metadata.ids.opID) {
-		return errors.New("invalid event, same as context")
+	var us int64
+	if e.overrides.ExplicitTS.IsZero() {
+		us = time.Now().UnixNano() / 1000
+	} else {
+		us = e.overrides.ExplicitTS.UnixNano() / 1000
 	}
 
-	us := time.Now().UnixNano() / 1000
 	e.AddInt64("Timestamp_u", us)
 
 	e.AddString("Hostname", host.Hostname())
