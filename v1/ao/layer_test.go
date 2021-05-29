@@ -145,20 +145,48 @@ func TestFromKVs(t *testing.T) {
 	assert.Equal(t, 1, m["hello"])
 }
 
-func TestAddKVsFromOpts(t *testing.T) {
-	assert.Equal(t, 0, len(addKVsFromOpts(SpanOptions{})))
+func TestGlobalTags(t *testing.T) {
+	r := reporter.SetTestReporter()
 
-	kvs := addKVsFromOpts(SpanOptions{}, "hello")
-	assert.Equal(t, []interface{}{"hello"}, kvs)
+	trace := NewTraceWithOptions("rootSpan", SpanOptions{
+		WithBackTrace: true,
+		GlobalTags: map[string]interface{}{
+			"globalTagKey": "globalTagValue",
+		},
+	})
 
-	kvs = addKVsFromOpts(SpanOptions{}, "hello", 1)
-	assert.Equal(t, []interface{}{"hello", 1}, kvs)
+	span := trace.BeginSpanWithOptions("childSpan", SpanOptions{
+		GlobalTags: map[string]interface{}{
+			"anotherGlobalTagKey": "anotherGlobalTagValue",
+		}})
 
-	kvs = addKVsFromOpts(SpanOptions{WithBackTrace: true})
-	assert.Equal(t, 2, len(kvs))
+	span.InfoWithOptions(SpanOptions{WithBackTrace: true})
 
-	kvs = addKVsFromOpts(SpanOptions{WithBackTrace: true}, "hello", 1)
-	assert.Equal(t, 4, len(kvs))
+	span.End()
+	trace.End()
+
+	r.Close(5)
+
+	for _, evt := range r.EventBufs {
+		m := make(map[string]interface{})
+		bson.Unmarshal(evt, m)
+		layer := m["Layer"]
+		switch layer {
+		case "rootSpan":
+			if m["Label"] == "entry" {
+				assert.NotNil(t, m[KeyBackTrace], layer, m["Label"])
+			}
+			assert.EqualValues(t, m["globalTagKey"], "globalTagValue", m["Label"])
+			if m["Label"] == "entry" {
+				assert.Nil(t, m["anotherGlobalTagKey"], m["Label"])
+			} else {
+				assert.EqualValues(t, m["anotherGlobalTagKey"], "anotherGlobalTagValue", m["Label"])
+			}
+		case "childSpan":
+			assert.EqualValues(t, m["globalTagKey"], "globalTagValue", m["Label"])
+			assert.EqualValues(t, m["anotherGlobalTagKey"], "anotherGlobalTagValue", m["Label"])
+		}
+	}
 }
 
 func TestMergeKVs(t *testing.T) {

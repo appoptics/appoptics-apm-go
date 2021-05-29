@@ -118,6 +118,7 @@ type Span interface {
 	addProfile(Profile)
 	aoContext() reporter.Context
 	ok() bool
+	GetTrace() Trace
 }
 
 // Profile is used to provide micro-benchmarks of named timings inside a Span.
@@ -143,6 +144,7 @@ type SpanOptions struct {
 
 	ContextOptions
 	TransactionName string
+	GlobalTags map[string]interface{}
 }
 
 // SpanOpt defines the function type that changes the SpanOptions
@@ -155,17 +157,24 @@ func WithBackTrace() SpanOpt {
 	}
 }
 
+// WithGlobalTags attach global tags to the span
+func WithGlobalTags(tags map[string]interface{}) SpanOpt {
+	return func(o *SpanOptions) {
+		o.GlobalTags = tags
+	}
+}
+
 // BeginSpan starts a new Span, provided a parent context and name. It returns a Span
 // and context bound to the new child Span.
 func BeginSpan(ctx context.Context, spanName string, args ...interface{}) (Span, context.Context) {
 	return BeginSpanWithOptions(ctx, spanName, SpanOptions{}, args...)
 }
 
-// addKVsFromOpts adds the KVs correspond to the options to the args
-func addKVsFromOpts(opts SpanOptions, args ...interface{}) []interface{} {
+// mergeTags adds the KVs correspond to the options to the args
+func mergeTags(tags map[string]interface{}, args ...interface{}) []interface{} {
 	kvs := args
-	if opts.WithBackTrace {
-		kvs = mergeKVs(args, []interface{}{KeyBackTrace, string(debug.Stack())})
+	for k, v := range tags {
+		kvs = append(kvs, k, v)
 	}
 	return kvs
 }
@@ -197,9 +206,9 @@ func fromKVs(kvs ...interface{}) KVMap {
 
 // BeginSpanWithOptions starts a span with provided options
 func BeginSpanWithOptions(ctx context.Context, spanName string, opts SpanOptions, args ...interface{}) (Span, context.Context) {
-	kvs := addKVsFromOpts(opts, args...)
 	if parent, ok := fromContext(ctx); ok && parent.ok() { // report span entry from parent context
-		l := newSpan(parent.aoContext().Copy(), spanName, parent, kvs...)
+		l := parent.BeginSpanWithOptions(spanName, opts, args...)
+
 		return l, newSpanContext(ctx, l)
 	}
 	return nullSpan{}, ctx
@@ -210,11 +219,16 @@ func (s *layerSpan) BeginSpan(spanName string, args ...interface{}) Span {
 	return s.BeginSpanWithOptions(spanName, SpanOptions{}, args...)
 }
 
+func addTagsFromOpts(opts SpanOptions, tags map[string]interface{}) {
+	if opts.WithBackTrace {
+		tags[KeyBackTrace] = string(debug.Stack())
+	}
+}
+
 // BeginSpanWithOptions starts a new child span with provided options
 func (s *layerSpan) BeginSpanWithOptions(spanName string, opts SpanOptions, args ...interface{}) Span {
 	if s.ok() { // copy parent context and report entry from child
-		kvs := addKVsFromOpts(opts, args...)
-		return newSpan(s.aoCtx.Copy(), spanName, s, kvs...)
+		return newSpan(s.aoContext().Copy(), spanName, s, s.produceKVsFromAllSources(opts, args...)...)
 	}
 	return nullSpan{}
 }
@@ -245,6 +259,8 @@ func (s *layerSpan) BeginProfile(profileName string, args ...interface{}) Profil
 // End a profiled block or method.
 func (s *span) End(args ...interface{}) {
 	if s.ok() {
+		globalTags := s.GetTrace().GetGlobalTags()
+
 		s.lock.Lock()
 		defer s.lock.Unlock()
 		for _, prof := range s.childProfiles {
@@ -254,7 +270,10 @@ func (s *span) End(args ...interface{}) {
 		for _, edge := range s.childEdges { // add Edge KV for each joined child
 			args = append(args, keyEdge, edge)
 		}
-		_ = s.aoCtx.ReportEvent(s.exitLabel(), s.layerName(), args...)
+
+		kvs := mergeTags(globalTags, args...)
+
+		_ = s.aoCtx.ReportEvent(s.exitLabel(), s.layerName(), kvs...)
 		s.childEdges = nil // clear child edge list
 		s.endArgs = nil
 		s.ended = true
@@ -287,7 +306,7 @@ func (s *layerSpan) Info(args ...interface{}) {
 // InfoWithOptions reports a new info event with the KVs and options provided
 func (s *layerSpan) InfoWithOptions(opts SpanOptions, args ...interface{}) {
 	if s.ok() {
-		kvs := addKVsFromOpts(opts, args...)
+		kvs := s.produceKVsFromAllSources(opts, args...)
 		s.aoCtx.ReportEvent(reporter.LabelInfo, s.layerName(), kvs...)
 	}
 }
@@ -341,6 +360,19 @@ var (
 // GetTransactionName returns the current value of the transaction name
 func (s *span) GetTransactionName() string {
 	return s.aoCtx.GetTransactionName()
+}
+
+func (s *span) produceKVsFromAllSources(opts SpanOptions, args ...interface{}) []interface{} {
+		s.GetTrace().AddGlobalTags(opts.GlobalTags)
+
+		tags := make(map[string]interface{})
+		for k, v := range s.GetTrace().GetGlobalTags() {
+			tags[k] = v
+		}
+
+		addTagsFromOpts(opts, tags)
+
+		return mergeTags(tags, args...)
 }
 
 type ErrType string
@@ -441,6 +473,7 @@ type span struct {
 	childProfiles []Profile
 	endArgs       []interface{}
 	ended         bool // has exit event been reported?
+	trace Trace
 	lock          sync.RWMutex
 }
 type layerSpan struct{ span }   // satisfies Span
@@ -470,6 +503,7 @@ func (s nullSpan) SetAsync(bool)                                         {}
 func (s nullSpan) SetOperationName(string)                               {}
 func (s nullSpan) SetTransactionName(string) error                       { return nil }
 func (s nullSpan) GetTransactionName() string                            { return "" }
+func (s nullSpan) GetTrace() Trace { return nil }
 
 // is this span still valid (has it timed out, expired, not sampled)
 func (s *span) ok() bool {
@@ -489,10 +523,17 @@ func (s *span) addChildEdge(ctx reporter.Context) {
 	defer s.lock.Unlock()
 	s.childEdges = append(s.childEdges, ctx.MetadataString())
 }
+
 func (s *span) addProfile(p Profile) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	s.childProfiles = append([]Profile{p}, s.childProfiles...)
+}
+
+func (s *span) GetTrace() Trace {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	return s.trace
 }
 
 // labelers help spans choose label and layer names.
@@ -522,6 +563,6 @@ func newSpan(aoCtx reporter.Context, spanName string, parent Span, args ...inter
 	if err := aoCtx.ReportEvent(ll.entryLabel(), ll.layerName(), args...); err != nil {
 		return nullSpan{}
 	}
-	return &layerSpan{span: span{aoCtx: aoCtx.Copy(), labeler: ll, parent: parent}}
+	return &layerSpan{span: span{aoCtx: aoCtx.Copy(), labeler: ll, parent: parent, trace: parent.GetTrace()}}
 
 }

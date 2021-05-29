@@ -72,6 +72,12 @@ type Trace interface {
 
 	// SetHTTPRspHeaders attach the headers to a trace
 	SetHTTPRspHeaders(map[string]string)
+
+	// AddGlobalTags attach global tags to the trace
+	AddGlobalTags(map[string]interface{})
+
+	// GetGlobalTags returns the attached global tags
+	GetGlobalTags() map[string]interface{}
 }
 
 // KVMap is a map of additional key-value pairs to report along with the event data provided
@@ -96,6 +102,7 @@ type aoTrace struct {
 	exitEvent      reporter.Event
 	httpSpan       traceHTTPSpan
 	httpRspHeaders map[string]string
+	globalTags 	   map[string]interface{}
 }
 
 func (t *aoTrace) aoContext() reporter.Context { return t.aoCtx }
@@ -121,7 +128,10 @@ func NewTraceWithOptions(spanName string, opts SpanOptions) Trace {
 		} else {
 			kvs = make(map[string]interface{})
 		}
-		for k, v := range fromKVs(addKVsFromOpts(opts)...) {
+
+		addTagsFromOpts(opts, kvs)
+
+		for k, v := range opts.GlobalTags {
 			kvs[k] = v
 		}
 
@@ -133,7 +143,10 @@ func NewTraceWithOptions(spanName string, opts SpanOptions) Trace {
 	t := &aoTrace{
 		layerSpan:      layerSpan{span: span{aoCtx: ctx, labeler: spanLabeler{spanName}}},
 		httpRspHeaders: make(map[string]string),
+		globalTags: opts.GlobalTags,
 	}
+
+	t.trace = t
 
 	if opts.TransactionName != "" {
 		t.SetTransactionName(opts.TransactionName)
@@ -226,6 +239,8 @@ func (t *aoTrace) SetStatus(status int) {
 
 func (t *aoTrace) reportExit() {
 	if t.ok() {
+		globalTags := t.GetGlobalTags()
+
 		t.lock.Lock()
 		defer t.lock.Unlock()
 
@@ -246,10 +261,13 @@ func (t *aoTrace) reportExit() {
 		for _, edge := range t.childEdges { // add Edge KV for each joined child
 			t.endArgs = append(t.endArgs, keyEdge, edge)
 		}
+
+		kvs := mergeTags(globalTags, t.endArgs...)
+
 		if t.exitEvent != nil { // use exit event, if one was provided
-			t.exitEvent.ReportContext(t.aoCtx, true, t.endArgs...)
+			t.exitEvent.ReportContext(t.aoCtx, true, kvs...)
 		} else {
-			t.aoCtx.ReportEvent(reporter.LabelExit, t.layerName(), t.endArgs...)
+			t.aoCtx.ReportEvent(reporter.LabelExit, t.layerName(), kvs...)
 		}
 
 		t.childEdges = nil // clear child edge list
@@ -380,6 +398,25 @@ func (t *aoTrace) SetHTTPRspHeaders(headers map[string]string) {
 	}
 }
 
+func (t *aoTrace) AddGlobalTags(tags map[string]interface{}) {
+	t.layerSpan.lock.Lock()
+	defer t.layerSpan.lock.Unlock()
+
+	if t.globalTags == nil {
+		t.globalTags = make(map[string]interface{})
+	}
+	for k, v := range tags {
+		t.globalTags[k] = v
+	}
+}
+
+func (t *aoTrace) GetGlobalTags() map[string]interface{} {
+	t.layerSpan.lock.Lock()
+	defer t.layerSpan.lock.Unlock()
+
+	return t.globalTags
+}
+
 // A nullTrace is not tracing.
 type nullTrace struct{ nullSpan }
 
@@ -394,6 +431,8 @@ func (t *nullTrace) LoggableTraceID() string                     { return "" }
 func (t *nullTrace) recordMetrics()                              {}
 func (t *nullTrace) HTTPRspHeaders() map[string]string           { return nil }
 func (t *nullTrace) SetHTTPRspHeaders(headers map[string]string) {}
+func (t *nullTrace) AddGlobalTags(map[string]interface{}) {}
+func (t *nullTrace) GetGlobalTags() map[string]interface{} { return nil }
 
 // NewNullTrace returns a trace that is not sampled.
 func NewNullTrace() Trace { return &nullTrace{} }

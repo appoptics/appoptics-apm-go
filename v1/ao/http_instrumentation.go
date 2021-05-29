@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"reflect"
 	"runtime"
-	"runtime/debug"
 	"strings"
 	"time"
 
@@ -170,7 +169,7 @@ func traceFromHTTPRequest(spanName string, r *http.Request, isNewContext bool, o
 
 	// start trace, passing in metadata header
 	t := NewTraceWithOptions(spanName, SpanOptions{
-		WithBackTrace: false,
+		WithBackTrace: so.WithBackTrace,
 		ContextOptions: reporter.ContextOptions{
 			MdStr:                  r.Header.Get(HTTPHeaderName),
 			URL:                    r.URL.EscapedPath(),
@@ -202,12 +201,10 @@ func traceFromHTTPRequest(spanName string, r *http.Request, isNewContext bool, o
 					}
 				}
 
-				if so.WithBackTrace {
-					kvs[KeyBackTrace] = string(debug.Stack())
-				}
-
 				return kvs
 			}},
+		TransactionName: so.TransactionName,
+		GlobalTags: so.GlobalTags,
 	})
 
 	// set the start time and method for metrics collection
